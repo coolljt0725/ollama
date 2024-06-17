@@ -248,6 +248,11 @@ type DeleteRequest struct {
 	Name string `json:"name"`
 }
 
+// GetModelRequest is the request passed to [Client.GetModel].
+type GetModelRequest struct {
+	Model string `json:"model"`
+}
+
 // ShowRequest is the request passed to [Client.Show].
 type ShowRequest struct {
 	Model    string `json:"model"`

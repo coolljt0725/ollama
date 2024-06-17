@@ -511,6 +511,15 @@ func ListHandler(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func SaveModelHandler(cmd *cobra.Command, args []string) error {
+	client, err := api.ClientFromEnvironment()
+	if err != nil {
+		return err
+	}
+	_, err = client.SaveModel(cmd.Context())
+	return err
+}
+
 func ListRunningHandler(cmd *cobra.Command, args []string) error {
 	client, err := api.ClientFromEnvironment()
 	if err != nil {
@@ -1183,6 +1192,13 @@ func NewCLI() *cobra.Command {
 		RunE:    ListRunningHandler,
 	}
 
+	saveCmd := &cobra.Command{
+		Use:     "save MODEL -o LOCALFILE",
+		Short:   "Save a model",
+		PreRunE: checkServerHeartbeat,
+		RunE:    SaveModelHandler,
+	}
+
 	copyCmd := &cobra.Command{
 		Use:     "cp SOURCE DESTINATION",
 		Short:   "Copy a model",
@@ -1214,6 +1230,7 @@ func NewCLI() *cobra.Command {
 		copyCmd,
 		deleteCmd,
 		serveCmd,
+		saveCmd,
 	} {
 		switch cmd {
 		case runCmd:
@@ -1250,6 +1267,7 @@ func NewCLI() *cobra.Command {
 		psCmd,
 		copyCmd,
 		deleteCmd,
+		saveCmd,
 	)
 
 	return rootCmd

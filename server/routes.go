@@ -623,6 +623,127 @@ func (s *Server) DeleteModelHandler(c *gin.Context) {
 	}
 }
 
+// func saveModel(name string, f io.Reader) error {
+func saveModel(name model.Name) error {
+	tempDir, err := os.MkdirTemp("", fmt.Sprintf(".ollama-export-%s", name))
+	if err != nil {
+		return err
+	}
+	//defer os.RemoveAll(tempDir)
+
+	blobsDir := filepath.Join(tempDir, "blobs")
+	if err := os.Mkdir(blobsDir, 0755); err != nil {
+		return err
+	}
+
+	manifest, err := ParseNamedManifest(name)
+	if err != nil {
+		return err
+	}
+
+	manifestPath := filepath.Join(tempDir, name)
+	dst, err := os.Open(manifestPath)
+	if err != nil {
+		return err
+	}
+	defer dst.Close()
+
+	manifests, err := GetManifestPath()
+	if err != nil {
+		return err
+	}
+
+	p := filepath.Join(manifests, manifest.filepath())
+
+	src, err := os.Open(p)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+
+	_, err = io.Copy(src, dst)
+	if err != nil {
+		return err
+	}
+
+	for _, layer := range append(manifest.Layers, manifest.Config) {
+		digest := strings.ReplaceAll(layer.Digest, ":", "-")
+		path := filepath.Join(tempDir, "blobs", digest)
+		dst, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer dst.Close()
+		src, err := layer.Open()
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(dst, src)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (s *Server) GetModelHandler(c *gin.Context) {
+	fmt.Printf("==============GetModelHandler================")
+	var req api.GetModelRequest
+	err := c.ShouldBindJSON(&req)
+	switch {
+	case errors.Is(err, io.EOF):
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "missing request body"})
+		return
+	case err != nil:
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if req.Model == "" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "model is required"})
+		return
+	}
+
+	name := model.ParseName(req.Model)
+	if !name.IsValid() {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid model name"})
+		return
+	}
+
+	if err := checkNameExists(name); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	saveModel(name)
+	/*ch := make(chan any)
+	go func() {
+		defer close(ch)
+		fn := func(r api.ProgressResponse) {
+			ch <- r
+		}
+
+		regOpts := &registryOptions{
+			Insecure: req.Insecure,
+		}
+
+		ctx, cancel := context.WithCancel(c.Request.Context())
+		defer cancel()
+
+		if err := PullModel(ctx, name.DisplayShortest(), regOpts, fn); err != nil {
+			ch <- gin.H{"error": err.Error()}
+		}
+	}()
+
+	if req.Stream != nil && !*req.Stream {
+		waitForStream(c, ch)
+		return
+	}*/
+
+	c.JSON(http.StatusOK, resp)
+	//streamResponse(c, ch)
+}
+
 func (s *Server) ShowModelHandler(c *gin.Context) {
 	var req api.ShowRequest
 	err := c.ShouldBindJSON(&req)
@@ -998,6 +1119,7 @@ func (s *Server) GenerateRoutes() http.Handler {
 	r.POST("/api/blobs/:digest", s.CreateBlobHandler)
 	r.HEAD("/api/blobs/:digest", s.HeadBlobHandler)
 	r.GET("/api/ps", s.ProcessHandler)
+	r.GET("/api/get", s.GetModelHandler)
 
 	// Compatibility endpoints
 	r.POST("/v1/chat/completions", openai.Middleware(), s.ChatHandler)

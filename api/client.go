@@ -303,6 +303,16 @@ func (c *Client) List(ctx context.Context) (*ListResponse, error) {
 	return &lr, nil
 }
 
+// List lists models that are available locally.
+func (c *Client) SaveModel(ctx context.Context) (*ListResponse, error) {
+	var lr ListResponse
+	if err := c.do(ctx, http.MethodGet, "/api/get", nil, &lr); err != nil {
+		return nil, err
+	}
+	return &lr, nil
+}
+
+
 // List running models.
 func (c *Client) ListRunning(ctx context.Context) (*ProcessResponse, error) {
 	var lr ProcessResponse
