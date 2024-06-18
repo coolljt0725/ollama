@@ -304,12 +304,11 @@ func (c *Client) List(ctx context.Context) (*ListResponse, error) {
 }
 
 // List lists models that are available locally.
-func (c *Client) SaveModel(ctx context.Context) (*ListResponse, error) {
-	var lr ListResponse
-	if err := c.do(ctx, http.MethodGet, "/api/get", nil, &lr); err != nil {
-		return nil, err
+func (c *Client) SaveModel(ctx context.Context, req *GetModelRequest) (error) {
+	if err := c.do(ctx, http.MethodGet, "/api/get", req, nil); err != nil {
+		return err
 	}
-	return &lr, nil
+	return nil
 }
 
 

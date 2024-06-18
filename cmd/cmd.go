@@ -516,7 +516,8 @@ func SaveModelHandler(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	_, err = client.SaveModel(cmd.Context())
+	req := api.GetModelRequest{Model: args[0]}
+	err = client.SaveModel(cmd.Context(), &req)
 	return err
 }
 

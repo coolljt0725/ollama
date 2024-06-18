@@ -625,10 +625,11 @@ func (s *Server) DeleteModelHandler(c *gin.Context) {
 
 // func saveModel(name string, f io.Reader) error {
 func saveModel(name model.Name) error {
-	tempDir, err := os.MkdirTemp("", fmt.Sprintf(".ollama-export-%s", name))
+	tempDir, err := os.MkdirTemp("", fmt.Sprintf("ollama-export-%s", name))
 	if err != nil {
 		return err
 	}
+	fmt.Printf("=====tempDir is %s========\n", tempDir)
 	//defer os.RemoveAll(tempDir)
 
 	blobsDir := filepath.Join(tempDir, "blobs")
@@ -641,7 +642,7 @@ func saveModel(name model.Name) error {
 		return err
 	}
 
-	manifestPath := filepath.Join(tempDir, name)
+	manifestPath := filepath.Join(tempDir, name.Tag)
 	dst, err := os.Open(manifestPath)
 	if err != nil {
 		return err
@@ -653,7 +654,7 @@ func saveModel(name model.Name) error {
 		return err
 	}
 
-	p := filepath.Join(manifests, manifest.filepath())
+	p := filepath.Join(manifests, name.Filepath())
 
 	src, err := os.Open(p)
 	if err != nil {
@@ -740,7 +741,7 @@ func (s *Server) GetModelHandler(c *gin.Context) {
 		return
 	}*/
 
-	c.JSON(http.StatusOK, resp)
+	c.JSON(http.StatusOK, nil)
 	//streamResponse(c, ch)
 }
 
