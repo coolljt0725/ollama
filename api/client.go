@@ -230,6 +230,27 @@ func (c *Client) streamBin(ctx context.Context, method, path string, data any, w
 	return nil
 }
 
+func (c *Client) sendRaw(ctx context.Context, method, path string, rd io.Reader) error {
+	// TODO: handle JSON response, error response handling
+	requestURL := c.base.JoinPath(path)
+	request, err := http.NewRequestWithContext(ctx, method, requestURL.String(), rd) // TODO: other function ?
+	if err != nil {
+		return err
+	}
+
+	request.Header.Set("Content-Type", "application/x-tar")
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("User-Agent", fmt.Sprintf("ollama/%s (%s %s) Go/%s", version.Version, runtime.GOARCH, runtime.GOOS, runtime.Version()))
+
+	response, err := c.http.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+
+	return nil
+}
+
 // GenerateResponseFunc is a function that [Client.Generate] invokes every time
 // a response is received from the service. If this function returns an error,
 // [Client.Generate] will stop generating and return this error.
@@ -341,6 +362,10 @@ type SaveModelFunc func(bts []byte) error
 func (c *Client) SaveModel(ctx context.Context, req *GetModelRequest, wr io.Writer) error {
 	c.streamBin(ctx, http.MethodGet, "/api/get", req, wr)
 	return nil
+}
+
+func (c *Client) LoadModel(ctx context.Context, rd io.Reader) error {
+	return c.sendRaw(ctx, http.MethodPost, "/api/load", rd)
 }
 
 // List running models.

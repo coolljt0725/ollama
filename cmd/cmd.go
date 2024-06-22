@@ -538,6 +538,25 @@ func SaveModelHandler(cmd *cobra.Command, args []string) error {
 	return err
 }
 
+func LoadModelHandler(cmd *cobra.Command, args []string) error {
+	client, err := api.ClientFromEnvironment()
+	if err != nil {
+		return err
+	}
+	input, err := cmd.Flags().GetString("input")
+	if err != nil {
+		return err
+	}
+	inputFile, err := os.Open(input)
+	if err != nil {
+		return err
+	}
+	defer inputFile.Close()
+
+	return client.LoadModel(cmd.Context(), inputFile)
+
+}
+
 func ListRunningHandler(cmd *cobra.Command, args []string) error {
 	client, err := api.ClientFromEnvironment()
 	if err != nil {
@@ -1219,6 +1238,15 @@ func NewCLI() *cobra.Command {
 	}
 	saveCmd.Flags().StringP("output", "o", "", "Name of the local file")
 
+	loadCmd := &cobra.Command{
+		Use:   "load -i LOCALFILE.tar",
+		Short: "load a model",
+		//	Args:    cobra.ExactArgs(1), // TODO: require a input
+		PreRunE: checkServerHeartbeat,
+		RunE:    LoadModelHandler,
+	}
+	loadCmd.Flags().StringP("input", "i", "", "Name of the local tar file to load")
+
 	copyCmd := &cobra.Command{
 		Use:     "cp SOURCE DESTINATION",
 		Short:   "Copy a model",
@@ -1288,6 +1316,7 @@ func NewCLI() *cobra.Command {
 		copyCmd,
 		deleteCmd,
 		saveCmd,
+		loadCmd,
 	)
 
 	return rootCmd

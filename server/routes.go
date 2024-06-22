@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"io/ioutil"
 	"log/slog"
 	"math"
 	"net"
@@ -742,6 +743,105 @@ func (s *Server) GetModelHandler(c *gin.Context) {
 	})
 }
 
+func UnTar(dst string, src io.Reader) error {
+	tr := tar.NewReader(src)
+	for {
+		hdr, err := tr.Next()
+
+		fmt.Printf("=====tr.Next, err is %v======\n", err)
+		switch {
+		case err == io.EOF:
+			return nil
+		case err != nil:
+			return err
+		case hdr == nil:
+			continue
+		}
+
+		dstFileDir := filepath.Join(dst, hdr.Name)
+
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			fmt.Printf("=======dst Dir is: %s=======\n", dstFileDir)
+			if err := os.MkdirAll(dstFileDir, 0775); err != nil {
+				return err
+			}
+		case tar.TypeReg:
+			fmt.Printf("=======dst file is: %s=======\n", dstFileDir)
+			file, err := os.OpenFile(dstFileDir, os.O_CREATE|os.O_RDWR, os.FileMode(hdr.Mode))
+			if err != nil {
+				return err
+			}
+			_, err = io.Copy(file, tr)
+			if err != nil {
+				return err
+			}
+
+			file.Close()
+		}
+	}
+
+	return nil
+}
+
+func loadModel(req io.Reader) error {
+	fmt.Printf("==========loadModel======\n")
+	tempDir, err := os.MkdirTemp("", "ollama-import-")
+	if err != nil {
+		return err
+	}
+	//defer os.RemoveAll(tempDir)
+	tmpTarfile, err := ioutil.TempFile(tempDir, "ollama-import-")
+	if err != nil {
+		return err
+	}
+
+	_, err = io.Copy(tmpTarfile, req)
+	if err != nil {
+		return err
+	}
+	tmpTarfile.Close()
+	//tr := tar.NewReader(req)
+	err = UnTar(tempDir, tmpTarfile)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Server) LoadModelHandler(c *gin.Context) {
+	/*	var req api.GetModelRequest
+		err := c.ShouldBindJSON(&req)
+		switch {
+		case errors.Is(err, io.EOF):
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "missing request body"})
+			return
+		case err != nil:
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		} */
+	fmt.Printf("========LoadModelHandler=======\n")
+	req := c.Request
+
+	if req == nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "missing request body"})
+		return
+	}
+	err := req.ParseForm()
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	err = loadModel(req.Body)
+	if err != nil {
+		fmt.Printf("================loadMoel failed with: %v=======\n", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, nil)
+}
+
 func (s *Server) ShowModelHandler(c *gin.Context) {
 	var req api.ShowRequest
 	err := c.ShouldBindJSON(&req)
@@ -1112,6 +1212,7 @@ func (s *Server) GenerateRoutes() http.Handler {
 	r.POST("/api/create", s.CreateModelHandler)
 	r.POST("/api/push", s.PushModelHandler)
 	r.POST("/api/copy", s.CopyModelHandler)
+	r.POST("/api/load", s.LoadModelHandler)
 	r.DELETE("/api/delete", s.DeleteModelHandler)
 	r.POST("/api/show", s.ShowModelHandler)
 	r.POST("/api/blobs/:digest", s.CreateBlobHandler)
