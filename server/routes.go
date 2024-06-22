@@ -1,6 +1,7 @@
 package server
 
 import (
+	"archive/tar"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -623,6 +624,124 @@ func (s *Server) DeleteModelHandler(c *gin.Context) {
 	}
 }
 
+// func saveModel(name string, f io.Reader) error {
+func saveModel(name model.Name, w io.Writer) error {
+	manifest, err := ParseNamedManifest(name)
+	if err != nil {
+		return err
+	}
+
+	tw := tar.NewWriter(w)
+	defer func() {
+		if err := tw.Close(); err != nil {
+			// TODO: Use log
+			fmt.Println(err)
+		}
+	}()
+
+	var index Index
+	index.SchemaVersion = schemaVersion
+	path, _ := strings.CutPrefix(manifest.filepath, modelsDir()+"/")
+	index.Manifests = append(index.Manifests, path)
+
+	var src []string
+	src = append(src, manifest.filepath)
+	for _, layer := range append(manifest.Layers, manifest.Config) {
+		blob, err := GetBlobsPath(layer.Digest)
+		if err != nil {
+			return err
+		}
+		src = append(src, blob)
+	}
+
+	for _, filename := range src {
+		fi, err := os.Stat(filename)
+		if err != nil {
+			return err
+		}
+		hdr, err := tar.FileInfoHeader(fi, "")
+		if err != nil {
+			return err
+		}
+		name, found := strings.CutPrefix(filename, modelsDir()+"/")
+		if found {
+			hdr.Name = name
+		}
+		err = tw.WriteHeader(hdr)
+		if err != nil {
+			return err
+		}
+		fs, err := os.Open(filename)
+		if err != nil {
+			return err
+		}
+		if _, err = io.Copy(tw, fs); err != nil {
+			return err
+		}
+		fs.Close()
+	}
+
+	data, err := json.Marshal(index)
+	if err != nil {
+		return err
+	}
+	h := &tar.Header{
+		Name:     "index.json",
+		Typeflag: tar.TypeReg,
+		ModTime:  time.Now(),
+		Mode:     0644,
+		Size:     int64(len(data)),
+	}
+	err = tw.WriteHeader(h)
+	if err != nil {
+		return err
+	}
+	_, err = tw.Write(data)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Server) GetModelHandler(c *gin.Context) {
+	var req api.GetModelRequest
+	err := c.ShouldBindJSON(&req)
+	switch {
+	case errors.Is(err, io.EOF):
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "missing request body"})
+		return
+	case err != nil:
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if req.Model == "" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "model is required"})
+		return
+	}
+
+	name := model.ParseName(req.Model)
+	if !name.IsValid() {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid model name"})
+		return
+	}
+
+	if err := checkNameExists(name); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.Header("Content-Type", "application/x-tar")
+	c.Stream(func(w io.Writer) bool {
+		if err := saveModel(name, w); err != nil {
+			// handle error message
+			slog.Info(fmt.Sprintf("get model failed with: %v", err))
+		}
+
+		return false
+	})
+}
+
 func (s *Server) ShowModelHandler(c *gin.Context) {
 	var req api.ShowRequest
 	err := c.ShouldBindJSON(&req)
@@ -998,6 +1117,7 @@ func (s *Server) GenerateRoutes() http.Handler {
 	r.POST("/api/blobs/:digest", s.CreateBlobHandler)
 	r.HEAD("/api/blobs/:digest", s.HeadBlobHandler)
 	r.GET("/api/ps", s.ProcessHandler)
+	r.GET("/api/get", s.GetModelHandler)
 
 	// Compatibility endpoints
 	r.POST("/v1/chat/completions", openai.Middleware(), s.ChatHandler)

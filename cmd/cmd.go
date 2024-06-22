@@ -511,6 +511,33 @@ func ListHandler(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func SaveModelHandler(cmd *cobra.Command, args []string) error {
+	client, err := api.ClientFromEnvironment()
+	if err != nil {
+		return err
+	}
+	output, err := cmd.Flags().GetString("output")
+	if err != nil {
+		return err
+
+	}
+	var dst io.Writer
+	if output != "" {
+		fi, err := os.OpenFile(output, os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return err
+		}
+		defer fi.Close()
+		dst = fi
+	} else {
+		dst = os.Stdout
+	}
+
+	req := api.GetModelRequest{Model: args[0]}
+	err = client.SaveModel(cmd.Context(), &req, dst)
+	return err
+}
+
 func ListRunningHandler(cmd *cobra.Command, args []string) error {
 	client, err := api.ClientFromEnvironment()
 	if err != nil {
@@ -1183,6 +1210,15 @@ func NewCLI() *cobra.Command {
 		RunE:    ListRunningHandler,
 	}
 
+	saveCmd := &cobra.Command{
+		Use:     "save MODEL -o LOCALFILE.tar",
+		Short:   "Save a model",
+		Args:    cobra.ExactArgs(1),
+		PreRunE: checkServerHeartbeat,
+		RunE:    SaveModelHandler,
+	}
+	saveCmd.Flags().StringP("output", "o", "", "Name of the local file")
+
 	copyCmd := &cobra.Command{
 		Use:     "cp SOURCE DESTINATION",
 		Short:   "Copy a model",
@@ -1214,6 +1250,7 @@ func NewCLI() *cobra.Command {
 		copyCmd,
 		deleteCmd,
 		serveCmd,
+		saveCmd,
 	} {
 		switch cmd {
 		case runCmd:
@@ -1250,6 +1287,7 @@ func NewCLI() *cobra.Command {
 		psCmd,
 		copyCmd,
 		deleteCmd,
+		saveCmd,
 	)
 
 	return rootCmd
