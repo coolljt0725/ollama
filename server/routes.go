@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -625,7 +626,6 @@ func (s *Server) DeleteModelHandler(c *gin.Context) {
 	}
 }
 
-// func saveModel(name string, f io.Reader) error {
 func saveModel(name model.Name, w io.Writer) error {
 	manifest, err := ParseNamedManifest(name)
 	if err != nil {
@@ -635,8 +635,7 @@ func saveModel(name model.Name, w io.Writer) error {
 	tw := tar.NewWriter(w)
 	defer func() {
 		if err := tw.Close(); err != nil {
-			// TODO: Use log
-			fmt.Println(err)
+			slog.Warn("failed to close tar writer", "error", err)
 		}
 	}()
 
@@ -736,7 +735,7 @@ func (s *Server) GetModelHandler(c *gin.Context) {
 	c.Stream(func(w io.Writer) bool {
 		if err := saveModel(name, w); err != nil {
 			// handle error message
-			slog.Info(fmt.Sprintf("get model failed with: %v", err))
+			slog.Error(fmt.Sprintf("get model failed with: %v", err))
 		}
 
 		return false
@@ -748,7 +747,6 @@ func UnTar(dst string, src io.Reader) error {
 	for {
 		hdr, err := tr.Next()
 
-		fmt.Printf("=====tr.Next, err is %v======\n", err)
 		switch {
 		case err == io.EOF:
 			return nil
@@ -762,12 +760,13 @@ func UnTar(dst string, src io.Reader) error {
 
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			fmt.Printf("=======dst Dir is: %s=======\n", dstFileDir)
 			if err := os.MkdirAll(dstFileDir, 0775); err != nil {
 				return err
 			}
 		case tar.TypeReg:
-			fmt.Printf("=======dst file is: %s=======\n", dstFileDir)
+			if err := os.MkdirAll(filepath.Dir(dstFileDir), 0755); err != nil && !errors.Is(err, os.ErrExist) {
+				return err
+			}
 			file, err := os.OpenFile(dstFileDir, os.O_CREATE|os.O_RDWR, os.FileMode(hdr.Mode))
 			if err != nil {
 				return err
@@ -782,6 +781,99 @@ func UnTar(dst string, src io.Reader) error {
 	}
 
 	return nil
+}
+
+func importBlob(tmpDir string, layer Layer) error {
+	blobs, err := GetBlobsPath("")
+	if err != nil {
+		return err
+	}
+
+	srcBlobName := strings.ReplaceAll(layer.Digest, "-", ":")
+	srcBlobPath := filepath.Join(tmpDir, "blobs/"+srcBlobName)
+
+	temp, err := os.CreateTemp(blobs, "sha256-")
+	if err != nil {
+		return nil, err
+	}
+	defer temp.Close()
+	defer os.Remove(temp.Name())
+
+	sha256sum := sha256.New()
+	n, err := io.Copy(io.MultiWriter(temp, sha256sum), r)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := temp.Close(); err != nil {
+		return nil, err
+	}
+
+	digest := fmt.Sprintf("sha256:%x", sha256sum.Sum(nil))
+	blob, err := GetBlobsPath(digest)
+	if err != nil {
+		return nil, err
+	}
+
+	status := "using existing layer"
+	if _, err := os.Stat(blob); err != nil {
+		status = "creating new layer"
+		if err := os.Rename(temp.Name(), blob); err != nil {
+			return nil, err
+		}
+	}
+
+	return &Layer{
+		MediaType: mediatype,
+		Digest:    digest,
+		Size:      n,
+		status:    fmt.Sprintf("%s %s", status, digest),
+	}, nil
+}
+
+func importModal(tmpDir string) error {
+	indexPath := filepath.Join(tmpDir, "index.json")
+	fi, err := os.Open(indexPath)
+	if err != nil {
+		return err
+	}
+	defer fi.Close()
+	var idx Index
+	err = json.NewDecoder(fi).Decode(&idx)
+	if err != nil {
+		return err
+	}
+	for _, manifestPath := range idx.Manifests {
+		manifestPath = filepath.Join(tmpDir, manifestPath)
+		mfi, err := os.Open(manifestPath)
+		if err != nil {
+			return err
+		}
+		defer mfi.Close()
+		var manifest ManifestV2
+		if err = json.NewDecoder(mfi).Decode(&manifest); err != nil {
+			return err
+		}
+		for _, layer := range manifest.Layers {
+			blobPath := filepath.Join(tmpDir, "blobs/"+strings.ReplaceAll(layer.Digest, "-", ":"))
+			bfi, err := os.Open(blobPath)
+			if err != nil {
+				manifest.RemoveLayer()
+				break
+			}
+			defer bfi.Close()
+			l, err := NewLayer(bfi, layer.MediaType)
+			if err != nil {
+				manifest.RemoveLayer()
+				break
+			}
+			if l.Digest != layer.Digest {
+				slog.Error("digest mismatch", "expected", layer.Digest, "got", l.Digest)
+				manifest.RemoveLayer()
+				break
+			}
+		}
+	}
 }
 
 func loadModel(req io.Reader) error {
@@ -800,8 +892,11 @@ func loadModel(req io.Reader) error {
 	if err != nil {
 		return err
 	}
-	tmpTarfile.Close()
-	//tr := tar.NewReader(req)
+	_, err = tmpTarfile.Seek(0, 0)
+	if err != nil {
+		return err
+	}
+
 	err = UnTar(tempDir, tmpTarfile)
 	if err != nil {
 		return err
@@ -810,17 +905,6 @@ func loadModel(req io.Reader) error {
 }
 
 func (s *Server) LoadModelHandler(c *gin.Context) {
-	/*	var req api.GetModelRequest
-		err := c.ShouldBindJSON(&req)
-		switch {
-		case errors.Is(err, io.EOF):
-			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "missing request body"})
-			return
-		case err != nil:
-			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		} */
-	fmt.Printf("========LoadModelHandler=======\n")
 	req := c.Request
 
 	if req == nil {
@@ -835,7 +919,7 @@ func (s *Server) LoadModelHandler(c *gin.Context) {
 
 	err = loadModel(req.Body)
 	if err != nil {
-		fmt.Printf("================loadMoel failed with: %v=======\n", err)
+		slog.Error("load model failed with: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
