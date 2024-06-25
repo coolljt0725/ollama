@@ -783,97 +783,123 @@ func UnTar(dst string, src io.Reader) error {
 	return nil
 }
 
-func importBlob(tmpDir string, layer Layer) error {
-	blobs, err := GetBlobsPath("")
+func loadBlob(tmpDir, srcDigest string) error {
+	srcBlobName := strings.ReplaceAll(srcDigest, ":", "-")
+	dstBlobDir, err := GetBlobsPath("")
 	if err != nil {
 		return err
 	}
 
-	srcBlobName := strings.ReplaceAll(layer.Digest, "-", ":")
-	srcBlobPath := filepath.Join(tmpDir, "blobs/"+srcBlobName)
-
-	temp, err := os.CreateTemp(blobs, "sha256-")
-	if err != nil {
-		return nil, err
+	dstBlobPath := filepath.Join(dstBlobDir, srcBlobName)
+	if _, err = os.Stat(dstBlobPath); err == nil {
+		// Blob already exist, just return
+		return nil
 	}
-	defer temp.Close()
-	defer os.Remove(temp.Name())
+	if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	dstFile, err := os.OpenFile(dstBlobPath, os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer dstFile.Close()
+
+	srcBlobPath := filepath.Join(tmpDir, "blobs/"+srcBlobName)
+	srcFile, err := os.Open(srcBlobPath)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
 
 	sha256sum := sha256.New()
-	n, err := io.Copy(io.MultiWriter(temp, sha256sum), r)
+	_, err = io.Copy(io.MultiWriter(dstFile, sha256sum), srcFile)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	if err := temp.Close(); err != nil {
-		return nil, err
+	if srcDigest != fmt.Sprintf("sha256:%x", sha256sum.Sum(nil)) {
+		return fmt.Errorf("Failed to load layer, digest mismatch, expected %q, got %q", srcDigest, fmt.Sprintf("sha256:%x", sha256sum.Sum(nil)))
 	}
 
-	digest := fmt.Sprintf("sha256:%x", sha256sum.Sum(nil))
-	blob, err := GetBlobsPath(digest)
-	if err != nil {
-		return nil, err
-	}
-
-	status := "using existing layer"
-	if _, err := os.Stat(blob); err != nil {
-		status = "creating new layer"
-		if err := os.Rename(temp.Name(), blob); err != nil {
-			return nil, err
-		}
-	}
-
-	return &Layer{
-		MediaType: mediatype,
-		Digest:    digest,
-		Size:      n,
-		status:    fmt.Sprintf("%s %s", status, digest),
-	}, nil
+	return nil
 }
 
-func importModal(tmpDir string) error {
+func loadManifest(src io.Reader, manifestPath string) error {
+	dstManifest := filepath.Join(modelsDir(), manifestPath)
+	_, err := os.Stat(dstManifest)
+	if err == nil {
+		// Manifest alread exist
+		// TODO: verify the digest to make sure it really exist
+		return nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(dstManifest), 0755); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	dst, err := os.OpenFile(dstManifest, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return err
+
+	}
+	defer dst.Close()
+
+	_, err = io.Copy(dst, src)
+	return err
+}
+
+func importModal(tmpDir string) (error, []string) {
 	indexPath := filepath.Join(tmpDir, "index.json")
 	fi, err := os.Open(indexPath)
 	if err != nil {
-		return err
+		return err, nil
 	}
 	defer fi.Close()
 	var idx Index
 	err = json.NewDecoder(fi).Decode(&idx)
 	if err != nil {
-		return err
+		return err, nil
 	}
+
+	var loadedManifest []string
+
 	for _, manifestPath := range idx.Manifests {
-		manifestPath = filepath.Join(tmpDir, manifestPath)
-		mfi, err := os.Open(manifestPath)
+		srcManifestPath := filepath.Join(tmpDir, manifestPath)
+		mfi, err := os.Open(srcManifestPath)
 		if err != nil {
-			return err
+			return err, loadedManifest
 		}
 		defer mfi.Close()
 		var manifest ManifestV2
 		if err = json.NewDecoder(mfi).Decode(&manifest); err != nil {
-			return err
+			return err, loadedManifest
+		}
+		fmt.Printf("=========manifest is %+v====\n", manifest)
+		_, err = mfi.Seek(0, 0)
+		if err != nil {
+			return err, loadedManifest
+		}
+		err = loadManifest(mfi, manifestPath)
+		if err != nil {
+			return err, loadedManifest
+		}
+
+		err = loadBlob(tmpDir, manifest.Config.Digest)
+		if err != nil {
+			return err, loadedManifest
 		}
 		for _, layer := range manifest.Layers {
-			blobPath := filepath.Join(tmpDir, "blobs/"+strings.ReplaceAll(layer.Digest, "-", ":"))
-			bfi, err := os.Open(blobPath)
+			err = loadBlob(tmpDir, layer.Digest)
 			if err != nil {
-				manifest.RemoveLayer()
-				break
-			}
-			defer bfi.Close()
-			l, err := NewLayer(bfi, layer.MediaType)
-			if err != nil {
-				manifest.RemoveLayer()
-				break
-			}
-			if l.Digest != layer.Digest {
-				slog.Error("digest mismatch", "expected", layer.Digest, "got", l.Digest)
-				manifest.RemoveLayer()
-				break
+				return err, loadedManifest
 			}
 		}
+		loadedManifest = append(loadedManifest, manifestPath)
 	}
+	return nil, loadedManifest
 }
 
 func loadModel(req io.Reader) error {
@@ -901,6 +927,25 @@ func loadModel(req io.Reader) error {
 	if err != nil {
 		return err
 	}
+
+	err, loadedManifest := importModal(tempDir)
+	if err != nil {
+		// clean up unused layers and manifests
+		if err = PruneLayers(); err != nil {
+			slog.Warn("Failed to prune layers", "error", err)
+		}
+
+		manifestsPath, err := GetManifestPath()
+		if err != nil {
+			slog.Warn("Failed to get manifest", "error", err)
+		}
+
+		if err := PruneDirectory(manifestsPath); err != nil {
+			slog.Warn("Failed to prune manifest directory", "error", err)
+		}
+		return err
+	}
+	fmt.Printf("========load manifest %+v==========\n", loadedManifest)
 	return nil
 }
 
